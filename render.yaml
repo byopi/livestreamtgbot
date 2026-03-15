@@ -2,9 +2,7 @@ services:
   - type: web
     name: tg-rtmp-multibot
     runtime: python
-    buildCommand: |
-      pip install -r requirements.txt
-      apt-get update -qq && apt-get install -y -qq ffmpeg
+    buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
       - key: BOT_TOKEN
