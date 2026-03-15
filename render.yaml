@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: tg-rtmp-multibot
+    runtime: python
+    buildCommand: |
+      pip install -r requirements.txt
+      apt-get update -qq && apt-get install -y -qq ffmpeg
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: MAX_STREAMS
+        value: "2"
+      - key: DB_PATH
+        value: /data/bot.db
+    disk:
+      name: botdata
+      mountPath: /data
+      sizeGB: 1
