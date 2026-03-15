@@ -10,13 +10,13 @@ from telegram.ext import (
 )
 from config import BOT_TOKEN
 from database import init_db
-from handlers.menu import start_handler, menu_callback
-from handlers.channels import (
+from menu import start_handler, menu_callback
+from channels import (
     add_channel_start, add_channel_name, add_channel_rtmp,
     add_channel_key, delete_channel_callback,
     CHANNEL_NAME, CHANNEL_RTMP, CHANNEL_KEY
 )
-from handlers.stream import stream_url_received, stop_stream_callback
+from stream import stream_url_received, stop_stream_callback
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
