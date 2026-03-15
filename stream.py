@@ -1,111 +1,129 @@
-import asyncio
-import logging
-import shutil
-from dataclasses import dataclass, field
-import imageio_ffmpeg
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes
+from telegram.constants import ParseMode
 
-logger = logging.getLogger(__name__)
+from database import get_channel
+from streamer import start_stream, stop_stream, is_streaming
+from config import MAX_STREAMS, ADMIN_IDS
 
-# Usa ffmpeg del sistema si está disponible, si no el de imageio-ffmpeg
-FFMPEG_BIN = shutil.which("ffmpeg") or imageio_ffmpeg.get_ffmpeg_exe()
-logger.info("FFmpeg binario: %s", FFMPEG_BIN)
+STREAM_URL = 10   # estado de conversación
 
 
-@dataclass
-class StreamSession:
-    channel_id: int
-    channel_name: str
-    source_url: str
-    process: asyncio.subprocess.Process = field(default=None, repr=False)
+async def stream_url_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Recibe la URL m3u8 (o cualquier URL de video) y arranca el stream.
+    Se activa cuando user_data["waiting_stream_url"] == True.
+    """
+    if not context.user_data.get("waiting_stream_url"):
+        return   # no estamos esperando nada
 
+    uid = update.effective_user.id
+    if uid not in ADMIN_IDS:
+        return
 
-_active: dict[int, StreamSession] = {}
+    channel_id = context.user_data.pop("pending_stream_channel", None)
+    context.user_data.pop("waiting_stream_url", None)
 
+    if channel_id is None:
+        await update.message.reply_text("⚠️ Error: no se encontró el canal seleccionado.")
+        return
 
-def is_streaming(channel_id: int) -> bool:
-    return channel_id in _active
+    source_url = update.message.text.strip()
 
-
-def active_streams() -> dict[int, StreamSession]:
-    return dict(_active)
-
-
-async def start_stream(channel_id: int, channel_name: str,
-                       rtmp_url: str, stream_key: str,
-                       source_url: str) -> bool:
-    if is_streaming(channel_id):
-        logger.warning("Canal %s ya está en stream", channel_id)
-        return False
-
-    destination = f"{rtmp_url.rstrip('/')}/{stream_key}"
-
-    cmd = [
-        FFMPEG_BIN,
-        "-re",
-        "-loglevel", "warning",
-        "-i", source_url,
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-tune", "zerolatency",
-        "-profile:v", "baseline",
-        "-level", "3.1",
-        "-b:v", "2500k",
-        "-maxrate", "2500k",
-        "-bufsize", "5000k",
-        "-pix_fmt", "yuv420p",
-        "-g", "60",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-ar", "44100",
-        "-f", "flv",
-        destination,
-    ]
-
-    try:
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
+    # Validación mínima
+    if not (source_url.startswith("http://") or source_url.startswith("https://")
+            or source_url.startswith("rtmp")):
+        await update.message.reply_text(
+            "⚠️ URL no válida. Debe comenzar con `http://`, `https://` o `rtmp://`.\n"
+            "Inténtalo de nuevo desde el menú.",
+            parse_mode=ParseMode.MARKDOWN,
         )
-    except FileNotFoundError:
-        logger.error("FFmpeg no encontrado en: %s", FFMPEG_BIN)
-        return False
+        return
 
-    session = StreamSession(
-        channel_id=channel_id,
-        channel_name=channel_name,
-        source_url=source_url,
-        process=process,
+    channel = await get_channel(channel_id)
+    if not channel or channel["owner_id"] != uid:
+        await update.message.reply_text("⚠️ Canal no encontrado.")
+        return
+
+    if is_streaming(channel_id):
+        await update.message.reply_text(f"⚠️ *{channel['name']}* ya está transmitiendo.")
+        return
+
+    # Límite de streams simultáneos
+    from streamer import active_streams
+    if len(active_streams()) >= MAX_STREAMS:
+        await update.message.reply_text(
+            f"⚠️ Límite de streams simultáneos alcanzado (`{MAX_STREAMS}`).\n"
+            "Detén alguno antes de iniciar otro.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    msg = await update.message.reply_text(
+        f"⏳ Iniciando stream en *{channel['name']}*...",
+        parse_mode=ParseMode.MARKDOWN,
     )
-    _active[channel_id] = session
 
-    asyncio.create_task(_watch(channel_id, process))
-    logger.info("▶️  Stream iniciado canal=%s pid=%s", channel_id, process.pid)
-    return True
+    ok = await start_stream(
+        channel_id=channel["id"],
+        channel_name=channel["name"],
+        rtmp_url=channel["rtmp_url"],
+        stream_key=channel["stream_key"],
+        source_url=source_url,
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏹ Detener este stream", callback_data=f"stop_stream:{channel_id}")],
+        [InlineKeyboardButton("⬅️ Menú principal", callback_data="main_menu")],
+    ])
+
+    if ok:
+        await msg.edit_text(
+            f"🟢 *Stream iniciado*\n\n"
+            f"📺 Canal: *{channel['name']}*\n"
+            f"🔗 Fuente: `{source_url}`\n\n"
+            "El stream seguirá activo hasta que lo detengas manualmente o se agote la fuente.",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    else:
+        await msg.edit_text(
+            "❌ No se pudo iniciar el stream. Comprueba que FFmpeg esté instalado "
+            "y que la URL sea accesible.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Menú principal", callback_data="main_menu")]
+            ]),
+        )
 
 
-async def stop_stream(channel_id: int) -> bool:
-    session = _active.pop(channel_id, None)
-    if session is None:
-        return False
+async def stop_stream_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Detiene el stream de un canal."""
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
 
-    proc = session.process
-    if proc and proc.returncode is None:
-        proc.terminate()
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=5)
-        except asyncio.TimeoutError:
-            proc.kill()
+    if uid not in ADMIN_IDS:
+        await query.answer("🚫 Sin permiso.", show_alert=True)
+        return
 
-    logger.info("⏹  Stream detenido canal=%s", channel_id)
-    return True
+    channel_id = int(query.data.split(":")[1])
+    channel = await get_channel(channel_id)
 
+    if not channel or channel["owner_id"] != uid:
+        await query.answer("Canal no encontrado.", show_alert=True)
+        return
 
-async def _watch(channel_id: int, process: asyncio.subprocess.Process):
-    _, stderr_data = await process.communicate()
-    if stderr_data:
-        logger.warning("FFmpeg stderr (canal %s): %s",
-                       channel_id, stderr_data.decode(errors="replace")[:500])
-    _active.pop(channel_id, None)
-    logger.info("🔴 FFmpeg terminó solo para canal=%s (rc=%s)",
-                channel_id, process.returncode)
+    stopped = await stop_stream(channel_id)
+
+    if stopped:
+        text = f"⏹ Stream de *{channel['name']}* detenido correctamente."
+    else:
+        text = f"ℹ️ *{channel['name']}* no estaba transmitiendo."
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ Menú principal", callback_data="main_menu")]
+        ]),
+        parse_mode=ParseMode.MARKDOWN,
+    )
