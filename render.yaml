@@ -2,7 +2,10 @@ services:
   - type: web
     name: tg-rtmp-multibot
     runtime: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: >-
+      pip install -r requirements.txt &&
+      curl -L https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+      | tar xJ --wildcards --strip-components=1 -C /usr/local/bin '*/ffmpeg'
     startCommand: python bot.py
     envVars:
       - key: BOT_TOKEN
@@ -12,8 +15,4 @@ services:
       - key: MAX_STREAMS
         value: "2"
       - key: DB_PATH
-        value: /data/bot.db
-    disk:
-      name: botdata
-      mountPath: /data
-      sizeGB: 1
+        value: bot.db
