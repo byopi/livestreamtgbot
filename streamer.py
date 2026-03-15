@@ -10,11 +10,23 @@ logger = logging.getLogger(__name__)
 FFMPEG_BIN = shutil.which("ffmpeg") or imageio_ffmpeg.get_ffmpeg_exe()
 logger.info("FFmpeg binario: %s", FFMPEG_BIN)
 
-YOUTUBE_DOMAINS = ("youtube.com", "youtu.be", "www.youtube.com")
+# Dominios que requieren yt-dlp para extraer la URL real
+YTDLP_DOMAINS = ("youtube.com", "youtu.be", "twitch.tv", "twitter.com", "x.com")
+
+# Si la URL contiene alguna de estas palabras clave es un stream directo
+DIRECT_KEYWORDS = (".m3u8", ".mp4", ".ts", ".flv", "rtmp://", "rtmps://")
 
 
-def is_youtube(url: str) -> bool:
-    return any(d in url for d in YOUTUBE_DOMAINS)
+def needs_ytdlp(url: str) -> bool:
+    """True si la URL necesita yt-dlp para extraer el stream real."""
+    url_lower = url.lower()
+    # Si contiene palabras clave de stream directo, no necesita yt-dlp
+    if any(kw in url_lower for kw in DIRECT_KEYWORDS):
+        return False
+    # Si es de un dominio conocido de plataformas, sí necesita yt-dlp
+    if any(d in url_lower for d in YTDLP_DOMAINS):
+        return True
+    return False
 
 
 def extract_direct_url(url: str) -> str | None:
@@ -62,9 +74,9 @@ async def start_stream(channel_id: int, channel_name: str,
         logger.warning("Canal %s ya está en stream", channel_id)
         return False
 
-    # Si es YouTube u otra plataforma, extraer URL directa
     actual_url = source_url
-    if is_youtube(source_url) or not source_url.endswith(".m3u8"):
+
+    if needs_ytdlp(source_url):
         logger.info("Extrayendo URL directa para: %s", source_url)
         loop = asyncio.get_event_loop()
         direct = await loop.run_in_executor(None, extract_direct_url, source_url)
@@ -73,6 +85,8 @@ async def start_stream(channel_id: int, channel_name: str,
         else:
             logger.error("No se pudo extraer URL directa")
             return False
+    else:
+        logger.info("URL directa detectada, pasando directo a FFmpeg")
 
     destination = f"{rtmp_url.rstrip('/')}/{stream_key}"
 
@@ -134,6 +148,5 @@ async def _watch(channel_id: int, process: asyncio.subprocess.Process,
     stderr_text = stderr_data.decode(errors="replace") if stderr_data else ""
     if stderr_text:
         logger.warning("FFmpeg stderr (canal %s): %s", channel_id, stderr_text[:500])
-
     _active.pop(channel_id, None)
     logger.info("🔴 FFmpeg terminó canal=%s (rc=%s)", channel_id, process.returncode)
