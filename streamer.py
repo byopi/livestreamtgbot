@@ -87,6 +87,8 @@ async def start_stream(channel_id: int, channel_name: str,
         FFMPEG_BIN,
         "-re",
         "-loglevel", "warning",
+        "-fflags", "+discardcorrupt+nobuffer",
+        "-err_detect", "ignore_err",
         "-i", actual_url,
         # Reencoding para garantizar compatibilidad con RTMP/FLV
         "-c:v", "libx264",
