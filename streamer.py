@@ -10,27 +10,20 @@ logger = logging.getLogger(__name__)
 FFMPEG_BIN = shutil.which("ffmpeg") or imageio_ffmpeg.get_ffmpeg_exe()
 logger.info("FFmpeg binario: %s", FFMPEG_BIN)
 
-# Dominios que requieren yt-dlp para extraer la URL real
 YTDLP_DOMAINS = ("youtube.com", "youtu.be", "twitch.tv", "twitter.com", "x.com")
-
-# Si la URL contiene alguna de estas palabras clave es un stream directo
 DIRECT_KEYWORDS = (".m3u8", ".mp4", ".ts", ".flv", "rtmp://", "rtmps://")
 
 
 def needs_ytdlp(url: str) -> bool:
-    """True si la URL necesita yt-dlp para extraer el stream real."""
     url_lower = url.lower()
-    # Si contiene palabras clave de stream directo, no necesita yt-dlp
     if any(kw in url_lower for kw in DIRECT_KEYWORDS):
         return False
-    # Si es de un dominio conocido de plataformas, sí necesita yt-dlp
     if any(d in url_lower for d in YTDLP_DOMAINS):
         return True
     return False
 
 
 def extract_direct_url(url: str) -> str | None:
-    """Extrae la URL directa del stream usando yt-dlp."""
     ydl_opts = {
         "format": "best[ext=mp4]/best",
         "quiet": True,
@@ -95,8 +88,20 @@ async def start_stream(channel_id: int, channel_name: str,
         "-re",
         "-loglevel", "warning",
         "-i", actual_url,
-        "-c:v", "copy",
-        "-c:a", "copy",
+        # Reencoding para garantizar compatibilidad con RTMP/FLV
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-tune", "zerolatency",
+        "-profile:v", "baseline",
+        "-level", "3.1",
+        "-b:v", "1500k",
+        "-maxrate", "1500k",
+        "-bufsize", "3000k",
+        "-pix_fmt", "yuv420p",
+        "-g", "60",
+        "-c:a", "aac",
+        "-b:a", "96k",
+        "-ar", "44100",
         "-f", "flv",
         destination,
     ]
